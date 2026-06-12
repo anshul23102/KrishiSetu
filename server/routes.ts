@@ -24,6 +24,7 @@ import { sendEmailNotification } from "./email";
 import { marketPricingService } from "./marketPricing";
 import { farmerCommunityService } from "./farmerCommunity";
 import { climateYieldPredictionService } from "./climateYieldPrediction";
+import { realtimeWeatherService } from "./realtimeWeather";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2234,6 +2235,120 @@ export async function registerRoutes(app: Express) {
     } catch (error) {
       console.error("Error searching discussions:", error);
       return res.status(500).json({ message: "Failed to search discussions" });
+    }
+  });
+
+  // Climate Yield Prediction API Endpoints
+  app.get("/api/climate/trends/:region", async (req: Request, res: Response) => {
+    try {
+      const { region } = req.params;
+      const trends = await climateYieldPredictionService.analyzeClimateTrends(region);
+      return res.json({ region, trends });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to analyze climate trends" });
+    }
+  });
+
+  app.post("/api/climate/predict-yield", async (req: Request, res: Response) => {
+    try {
+      const { region, crop, baseline_yield, rainfall_mm, temperature_avg, temperature_max, temperature_min, humidity_percent, sunlight_hours, soil_ph, soil_nitrogen, extreme_events } = req.body;
+      if (!region || !crop || !baseline_yield) {
+        return res.status(400).json({ message: "Region, crop, and baseline_yield are required" });
+      }
+      const prediction = await climateYieldPredictionService.predictYield(region, crop, baseline_yield, {
+        rainfall_mm: rainfall_mm || 600,
+        temperature_avg: temperature_avg || 25,
+        temperature_max: temperature_max || 30,
+        temperature_min: temperature_min || 20,
+        humidity_percent: humidity_percent || 60,
+        sunlight_hours: sunlight_hours || 8,
+        soil_ph: soil_ph || 6.5,
+        soil_nitrogen: soil_nitrogen || 150,
+        extreme_events: extreme_events || [],
+      });
+      return res.json({ prediction });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to predict yield" });
+    }
+  });
+
+  // Real-time Weather API Endpoints
+  app.get("/api/weather/current", async (req: Request, res: Response) => {
+    try {
+      const { latitude, longitude } = req.query;
+      if (!latitude || !longitude) {
+        return res.status(400).json({ message: "Latitude and longitude are required" });
+      }
+      const weather = await realtimeWeatherService.fetchRealtimeWeather(
+        parseFloat(latitude as string),
+        parseFloat(longitude as string),
+      );
+      return res.json({ weather });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to fetch weather data" });
+    }
+  });
+
+  app.get("/api/weather/hyperlocal", async (req: Request, res: Response) => {
+    try {
+      const { latitude, longitude, radius_meters } = req.query;
+      if (!latitude || !longitude) {
+        return res.status(400).json({ message: "Latitude and longitude are required" });
+      }
+      const weather = await realtimeWeatherService.getHyperlocalWeather(
+        parseFloat(latitude as string),
+        parseFloat(longitude as string),
+        radius_meters ? parseInt(radius_meters as string) : 1000,
+      );
+      return res.json({ weather });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to fetch hyperlocal weather" });
+    }
+  });
+
+  app.get("/api/weather/monsoon", async (req: Request, res: Response) => {
+    try {
+      const { latitude, longitude } = req.query;
+      if (!latitude || !longitude) {
+        return res.status(400).json({ message: "Latitude and longitude are required" });
+      }
+      const monsoonForecast = await realtimeWeatherService.getMonsoonForecast(
+        parseFloat(latitude as string),
+        parseFloat(longitude as string),
+      );
+      return res.json({ monsoon: monsoonForecast });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to fetch monsoon forecast" });
+    }
+  });
+
+  app.get("/api/weather/recommendations", async (req: Request, res: Response) => {
+    try {
+      const { latitude, longitude, crop } = req.query;
+      if (!latitude || !longitude || !crop) {
+        return res.status(400).json({ message: "Latitude, longitude, and crop are required" });
+      }
+      const recommendations = await realtimeWeatherService.getFarmingRecommendations(
+        parseFloat(latitude as string),
+        parseFloat(longitude as string),
+        crop as string,
+      );
+      return res.json({ crop, recommendations });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to get farming recommendations" });
+    }
+  });
+
+  app.post("/api/weather/compare-regions", async (req: Request, res: Response) => {
+    try {
+      const { locations } = req.body;
+      if (!locations || !Array.isArray(locations)) {
+        return res.status(400).json({ message: "Locations array is required" });
+      }
+      const comparison = await realtimeWeatherService.compareWeatherAcrossRegions(locations);
+      return res.json({ comparison });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to compare regions" });
     }
   });
 
