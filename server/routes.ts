@@ -25,6 +25,7 @@ import { marketPricingService } from "./marketPricing";
 import { farmerCommunityService } from "./farmerCommunity";
 import { climateYieldPredictionService } from "./climateYieldPrediction";
 import { realtimeWeatherService } from "./realtimeWeather";
+import { soilValidationService } from "./soilValidation";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2349,6 +2350,53 @@ export async function registerRoutes(app: Express) {
       return res.json({ comparison });
     } catch (error) {
       return res.status(500).json({ message: "Failed to compare regions" });
+    }
+  });
+
+  // Soil Validation API Endpoints
+  app.post("/api/soil/validate", async (req: Request, res: Response) => {
+    try {
+      const testData = req.body;
+      if (!testData.region || testData.ph_value === undefined) {
+        return res.status(400).json({ message: "Region and pH value are required" });
+      }
+      const result = await soilValidationService.validateSoilTest({
+        ...testData,
+        test_date: new Date(testData.test_date || Date.now()),
+      });
+      return res.status(201).json({ result });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to validate soil test" });
+    }
+  });
+
+  app.get("/api/soil/standards/:region", async (req: Request, res: Response) => {
+    try {
+      const { region } = req.params;
+      const standards = await soilValidationService.getRegionalStandards(region);
+      return res.json({ region, standards });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to fetch regional standards" });
+    }
+  });
+
+  app.post("/api/soil/fertilizer-recommendation", async (req: Request, res: Response) => {
+    try {
+      const testResult = req.body;
+      const recommendation = await soilValidationService.getFertilizerRecommendation(testResult);
+      return res.json({ recommendation });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to generate recommendation" });
+    }
+  });
+
+  app.get("/api/soil/summary/:region", async (req: Request, res: Response) => {
+    try {
+      const { region } = req.params;
+      const summary = await soilValidationService.getRegionValidationSummary(region);
+      return res.json({ summary });
+    } catch (error) {
+      return res.status(500).json({ message: "Failed to fetch summary" });
     }
   });
 
