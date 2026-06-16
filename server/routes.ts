@@ -21,6 +21,8 @@ import { verifyFirebaseIdToken } from "./firebaseJwt";
 import { uploadPaymentProof } from "./firebaseStorage";
 import { getDb, MongoStorage } from "./storage";
 import { sendEmailNotification } from "./email";
+import { marketPricingService } from "./marketPricing";
+import { farmerCommunityService } from "./farmerCommunity";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1828,6 +1830,409 @@ export async function registerRoutes(app: Express) {
       return res.json(analysis);
     } catch (error) {
       return res.status(500).json({ message: "Quality analysis failed" });
+    }
+  });
+
+  // Market Pricing API Endpoints
+  // Get real-time market prices for a crop
+  app.get("/api/market/prices", async (req: Request, res: Response) => {
+    try {
+      const { crop, market } = req.query;
+
+      if (!crop || typeof crop !== "string") {
+        return res.status(400).json({ message: "Crop parameter is required" });
+      }
+
+      const prices = await marketPricingService.fetchRealtimePrices(
+        crop,
+        market && typeof market === "string" ? market : undefined,
+      );
+
+      return res.json({
+        crop,
+        market: market || "all",
+        prices,
+        last_updated: new Date(),
+        data_freshness: "Real-time (updated every 4 hours)",
+      });
+    } catch (error) {
+      console.error("Error fetching market prices:", error);
+      return res.status(500).json({ message: "Failed to fetch market prices" });
+    }
+  });
+
+  // Get 7-day price trend for trend analysis
+  app.get("/api/market/trend/:crop/:market", async (req: Request, res: Response) => {
+    try {
+      const { crop, market } = req.params;
+      const days = req.query.days ? parseInt(req.query.days as string) : 7;
+
+      if (days < 1 || days > 30) {
+        return res.status(400).json({ message: "Days must be between 1 and 30" });
+      }
+
+      const trend = await marketPricingService.getPriceTrend(crop, market, days);
+
+      return res.json({
+        crop,
+        market,
+        days,
+        trend_data: trend,
+        analysis: trend.length > 1 ? calculateTrendAnalysis(trend) : null,
+      });
+    } catch (error) {
+      console.error("Error fetching price trend:", error);
+      return res.status(500).json({ message: "Failed to fetch price trend" });
+    }
+  });
+
+  // Get nearby market prices for comparison
+  app.post("/api/market/nearby-prices", async (req: Request, res: Response) => {
+    try {
+      const { crop, latitude, longitude, radius } = req.body;
+
+      if (!crop || latitude === undefined || longitude === undefined) {
+        return res.status(400).json({
+          message: "Crop, latitude, and longitude are required",
+        });
+      }
+
+      const nearbyPrices = await marketPricingService.getNearbyMarketPrices(
+        crop,
+        { latitude, longitude },
+        radius || 50,
+      );
+
+      return res.json({
+        crop,
+        user_location: { latitude, longitude },
+        search_radius_km: radius || 50,
+        nearby_market_prices: nearbyPrices.slice(0, 10), // Top 10 markets
+        best_price: nearbyPrices[0]?.price_per_unit,
+        price_range: {
+          min: Math.min(...nearbyPrices.map((p) => p.price_per_unit)),
+          max: Math.max(...nearbyPrices.map((p) => p.price_per_unit)),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching nearby market prices:", error);
+      return res.status(500).json({ message: "Failed to fetch nearby market prices" });
+    }
+  });
+
+  // Subscribe to price alerts
+  app.post("/api/market/alerts/subscribe", requireFirebaseAuth, async (req: Request, res: Response) => {
+    try {
+      const firebaseUid = res.locals.firebaseUid as string;
+      const { crop, target_price, alert_type } = req.body;
+
+      if (!crop || !target_price || !alert_type) {
+        return res.status(400).json({
+          message: "Crop, target_price, and alert_type are required",
+        });
+      }
+
+      if (!["above", "below"].includes(alert_type)) {
+        return res.status(400).json({
+          message: "alert_type must be 'above' or 'below'",
+        });
+      }
+
+      const alertId = await marketPricingService.subscribePriceAlert(
+        firebaseUid,
+        crop,
+        target_price,
+        alert_type,
+      );
+
+      return res.json({
+        alert_id: alertId,
+        crop,
+        target_price,
+        alert_type,
+        status: "active",
+        message: "Price alert subscription successful. You will receive notifications when prices cross your target.",
+      });
+    } catch (error) {
+      console.error("Error setting up price alert:", error);
+      return res.status(500).json({ message: "Failed to set up price alert" });
+    }
+  });
+
+  // Predict next day's price
+  app.get("/api/market/predict/:crop/:market", async (req: Request, res: Response) => {
+    try {
+      const { crop, market } = req.params;
+
+      const prediction = await marketPricingService.predictNextDayPrice(crop, market);
+
+      return res.json({
+        crop,
+        market,
+        prediction: {
+          predicted_price: prediction.predicted_price,
+          trend: prediction.trend,
+          confidence: `${(prediction.confidence * 100).toFixed(0)}%`,
+        },
+        recommendation:
+          prediction.trend === "up"
+            ? "Prices are expected to rise. Consider waiting to sell for better returns."
+            : prediction.trend === "down"
+              ? "Prices are expected to fall. Consider selling soon to avoid losses."
+              : "Prices are expected to remain stable.",
+      });
+    } catch (error) {
+      console.error("Error predicting price:", error);
+      return res.status(500).json({ message: "Failed to predict price" });
+    }
+  });
+
+  // Helper function for trend analysis
+  function calculateTrendAnalysis(priceData: any[]) {
+    if (priceData.length < 2) return null;
+
+    const prices = priceData.map((p) => p.price_per_unit);
+    const firstPrice = prices[0];
+    const lastPrice = prices[prices.length - 1];
+    const percentageChange = ((lastPrice - firstPrice) / firstPrice) * 100;
+
+    return {
+      percentage_change: percentageChange.toFixed(2),
+      direction: percentageChange > 0 ? "up" : percentageChange < 0 ? "down" : "stable",
+      average_price: (prices.reduce((a, b) => a + b) / prices.length).toFixed(2),
+      highest_price: Math.max(...prices),
+      lowest_price: Math.min(...prices),
+      volatility: calculateVolatility(prices),
+    };
+  }
+
+  // Helper function for calculating price volatility
+  function calculateVolatility(prices: number[]) {
+    const mean = prices.reduce((a, b) => a + b) / prices.length;
+    const variance = prices.reduce((acc, price) => acc + Math.pow(price - mean, 2), 0) / prices.length;
+    const stdDev = Math.sqrt(variance);
+    return (stdDev / mean * 100).toFixed(2);
+  }
+
+  // Farmer Community API Endpoints
+  // Create forum discussion
+  app.post("/api/community/forum", requireFirebaseAuth, async (req: Request, res: Response) => {
+    try {
+      const firebaseUid = res.locals.firebaseUid as string;
+      const user = await storage.getUserByFirebaseUid(firebaseUid);
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const { category, topic, title, content, tags } = req.body;
+
+      const post = await farmerCommunityService.createForumPost({
+        author_id: user.id,
+        author_name: user.name,
+        category,
+        topic,
+        title,
+        content,
+        tags: tags || [],
+      });
+
+      return res.status(201).json({
+        message: "Forum post created successfully",
+        post,
+      });
+    } catch (error) {
+      console.error("Error creating forum post:", error);
+      return res.status(500).json({ message: "Failed to create forum post" });
+    }
+  });
+
+  // Get forum discussions
+  app.get("/api/community/forum", async (req: Request, res: Response) => {
+    try {
+      const { category, topic } = req.query;
+
+      if (!category || typeof category !== "string") {
+        return res.status(400).json({ message: "Category parameter is required" });
+      }
+
+      const discussions = await farmerCommunityService.getForumDiscussions(
+        category,
+        topic && typeof topic === "string" ? topic : undefined,
+      );
+
+      return res.json({
+        category,
+        topic: topic || "all",
+        discussions_count: discussions.length,
+        discussions,
+      });
+    } catch (error) {
+      console.error("Error fetching forum discussions:", error);
+      return res.status(500).json({ message: "Failed to fetch forum discussions" });
+    }
+  });
+
+  // Add reply to discussion
+  app.post("/api/community/forum/:postId/reply", requireFirebaseAuth, async (req: Request, res: Response) => {
+    try {
+      const firebaseUid = res.locals.firebaseUid as string;
+      const user = await storage.getUserByFirebaseUid(firebaseUid);
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const { postId } = req.params;
+      const { content } = req.body;
+
+      const reply = await farmerCommunityService.addDiscussionReply({
+        post_id: postId,
+        author_id: user.id,
+        author_name: user.name,
+        content,
+      });
+
+      return res.status(201).json({
+        message: "Reply added successfully",
+        reply,
+      });
+    } catch (error) {
+      console.error("Error adding reply:", error);
+      return res.status(500).json({ message: "Failed to add reply" });
+    }
+  });
+
+  // Share farming experience
+  app.post("/api/community/experiences", requireFirebaseAuth, async (req: Request, res: Response) => {
+    try {
+      const firebaseUid = res.locals.firebaseUid as string;
+      const user = await storage.getUserByFirebaseUid(firebaseUid);
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const { crop, region, technique, description, results, yield_improvement, cost_savings, difficulty_level, tags } = req.body;
+
+      const experience = await farmerCommunityService.shareExperience({
+        author_id: user.id,
+        author_name: user.name,
+        crop,
+        region,
+        technique,
+        description,
+        results,
+        yield_improvement,
+        cost_savings,
+        difficulty_level,
+        tags: tags || [],
+      });
+
+      return res.status(201).json({
+        message: "Experience shared successfully",
+        experience,
+      });
+    } catch (error) {
+      console.error("Error sharing experience:", error);
+      return res.status(500).json({ message: "Failed to share experience" });
+    }
+  });
+
+  // Get success stories
+  app.get("/api/community/experiences", async (req: Request, res: Response) => {
+    try {
+      const { crop, region } = req.query;
+
+      const stories = await farmerCommunityService.getSuccessStories(
+        crop && typeof crop === "string" ? crop : undefined,
+        region && typeof region === "string" ? region : undefined,
+      );
+
+      return res.json({
+        crop: crop || "all",
+        region: region || "all",
+        stories_count: stories.length,
+        stories,
+      });
+    } catch (error) {
+      console.error("Error fetching success stories:", error);
+      return res.status(500).json({ message: "Failed to fetch success stories" });
+    }
+  });
+
+  // Get best practices
+  app.get("/api/community/best-practices", async (req: Request, res: Response) => {
+    try {
+      const { category, crop, region } = req.query;
+
+      if (!category || typeof category !== "string") {
+        return res.status(400).json({ message: "Category parameter is required" });
+      }
+
+      const practices = await farmerCommunityService.getBestPractices(
+        category,
+        crop && typeof crop === "string" ? crop : undefined,
+        region && typeof region === "string" ? region : undefined,
+      );
+
+      return res.json({
+        category,
+        crop: crop || "all",
+        region: region || "all",
+        practices_count: practices.length,
+        practices,
+      });
+    } catch (error) {
+      console.error("Error fetching best practices:", error);
+      return res.status(500).json({ message: "Failed to fetch best practices" });
+    }
+  });
+
+  // Find regional experts
+  app.get("/api/community/experts/:region", async (req: Request, res: Response) => {
+    try {
+      const { region } = req.params;
+
+      const experts = await farmerCommunityService.findRegionalExperts(region);
+
+      return res.json({
+        region,
+        experts_count: experts.length,
+        experts: experts.slice(0, 10), // Top 10 experts
+      });
+    } catch (error) {
+      console.error("Error finding regional experts:", error);
+      return res.status(500).json({ message: "Failed to find regional experts" });
+    }
+  });
+
+  // Get farmer profile
+  app.get("/api/community/profile/:userId", async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.params;
+
+      const profile = await farmerCommunityService.getFarmerProfile(userId);
+
+      return res.json({
+        profile,
+      });
+    } catch (error) {
+      console.error("Error fetching farmer profile:", error);
+      return res.status(500).json({ message: "Failed to fetch farmer profile" });
+    }
+  });
+
+  // Search community discussions
+  app.get("/api/community/search", async (req: Request, res: Response) => {
+    try {
+      const { q } = req.query;
+
+      if (!q || typeof q !== "string") {
+        return res.status(400).json({ message: "Search query is required" });
+      }
+
+      const results = await farmerCommunityService.searchDiscussions(q);
+
+      return res.json({
+        query: q,
+        results_count: results.length,
+        results,
+      });
+    } catch (error) {
+      console.error("Error searching discussions:", error);
+      return res.status(500).json({ message: "Failed to search discussions" });
     }
   });
 
